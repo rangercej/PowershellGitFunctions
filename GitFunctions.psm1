@@ -153,7 +153,7 @@ function Import-SshKey
 	}
 
 	Copy-Item -Force -Path $keyFile -Destination $targetFile
-	Set-HostKeyInternal -gitHost $gitHost -keyFile $keyFile
+	Set-HostKeyInternal -gitHost $gitHost -keyFile $targetFile
 }
 
 #------------------------------------------------------------------------------
@@ -166,8 +166,8 @@ function Revoke-SshKey
 
 	$targetFile = Join-Path -Path $script:PrivateKeyPath -ChildPath $gitHost
 
-	Remove-Item -Force -Path $keyFile -Destination $targetFile
-	Remove-HostKeyInternal -gitHost $gitHost -keyFile $keyFile
+	Remove-Item -Force -Path $targetFile
+	Remove-HostKeyInternal -gitHost $gitHost
 }
 
 #------------------------------------------------------------------------------
@@ -176,6 +176,11 @@ function Get-SshKey
 	Param (
 		[string]$gitHost = ""
 	)
+
+	if (-not (Test-Path $script:SshConfigFile))
+	{
+		return
+	}
 
 	$haveHost = $false
 	Get-Content $script:SshConfigFile | ForEach-Object {
@@ -299,11 +304,17 @@ Function Merge-HostDefInternal
 
 #------------------------------------------------------------------------------
 $script:PrivateKeyPath = Join-Path -Path $([Environment]::GetFolderPath('ApplicationData')) -ChildPath "Nightwolf/GitFunctions/keys"
-$script:SshConfigFile = (get-item ~/.ssh/config).Fullname
-
 if (-not (Test-Path $script:PrivateKeyPath)) {
 	New-Item -Type Directory -Path $script:PrivateKeyPath
 }
+
+# We can't use (get-item).fullname if config doesn't exist. Nor can we use
+# resolve-path. So this incantation resolves the path instead.
+$script:SshConfigFile = "~/.ssh/config"
+if (-not (Test-Path $script:SshConfigFile)) {
+	New-Item -Type File -Path $script:SshConfigFile
+}
+$script:SshConfigFile = (Get-Item $script:SshConfigFile).FullName
 
 Export-ModuleMember -Function Get-GitBranch
 Export-ModuleMember -Function Get-SshAgent
