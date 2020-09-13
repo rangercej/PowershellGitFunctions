@@ -100,30 +100,82 @@ function Stop-SshAgent
 }
 
 #------------------------------------------------------------------------------
-function Enable-GithubKey
+function Enable-SshKey
 {
-	$githubKey = (get-item ~/.ssh/github.key).Fullname
+	Param (
+		[string]$gitHost = "github.com"
+	)
 
-	$agent = Get-SshAgent
-	if ($null -eq $agent) {
-		"Starting ssh-agent"
-		Start-SshAgent $agent
+	$githubKey = (Get-SshKey -Host $gitHost).KeyFile
+	if ($null -ne $githubKey) {
+		$agent = Get-SshAgent
+		if ($null -eq $agent) {
+			"Starting ssh-agent"
+			Start-SshAgent $agent
+		}
+
+		$existingKeys = & "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" -l
+
+		# Output is something like:
+		#     2048 SHA256:eDHWeFhz3kAkB6YQ C:\Users\bob\.ssh\github.key (RSA)
+		foreach ($key in $existingKeys) {
+			$parts = $key -split " "
+			if ($parts[2] -eq $githubKey) {
+				write-warning "Key already added: $key"
+				return
+			}
+		}
+
+		"Adding github key"
+		& "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" $githubKey
 	}
+}
 
-	$existingKeys = & "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" -l
+#------------------------------------------------------------------------------
+function Add-SshKey
+{
+	Param (
+		[Parameter(Mandatory = $true)]	
+		[string]$gitHost,
 
-	# Output is something like:
-	#     2048 SHA256:eDHWeFhz3kAkB6YQ C:\Users\bob\.ssh\github.key (RSA)
-	foreach ($key in $existingKeys) {
-		$parts = $key -split " "
-		if ($parts[2] -eq $githubKey) {
-			write-warning "Key already added: $key"
-			return
+		[Parameter(Mandatory = $true)]	
+		[string]$keyFile
+	)
+
+	$sshConfigFile = (get-item ~/.ssh/config).Fullname
+
+	"" | out-file -Append -Encoding utf8 $sshConfigFile
+	"Host $gitHost" | out-file -Append -Encoding utf8 $sshConfigFile
+	"    IdentityFile $keyFile" | out-file -Append -Encoding utf8 $sshConfigFile
+}
+
+#------------------------------------------------------------------------------
+function Get-SshKey
+{
+	Param (
+		[string]$gitHost = ""
+	)
+
+	$sshConfigFile = (get-item ~/.ssh/config).Fullname
+
+	$haveHost = $false
+	Get-Content $sshConfigFile | ForEach-Object {
+		$line = $_ -replace '^\s*',''
+		if ($line -imatch "^Host ")
+		{
+			$configHost = ($line -split ' ')[1]
+			if ($gitHost -eq $configHost -or $gitHost -eq "") {
+				$haveHost = $true
+			} else {
+				$haveHost = $false
+			}
+		}
+
+		if ($haveHost -and $line -imatch "^IdentityFile ") {
+			$keyFile = ($line -split ' ')[1]
+			[PSCustomObject]@{ "Host" = $configHost; "KeyFile" = (Get-Item $keyFile).FullName }
 		}
 	}
-
-	"Adding github key"
-	& "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" $githubKey
 }
 
 #------------------------------------------------------------------------------
@@ -131,4 +183,6 @@ Export-ModuleMember -Function Get-GitBranch
 Export-ModuleMember -Function Get-SshAgent
 Export-ModuleMember -Function Start-SshAgent
 Export-ModuleMember -Function Stop-SshAgent
-Export-ModuleMember -Function Enable-GithubKey
+Export-ModuleMember -Function Enable-SshKey
+Export-ModuleMember -Function Get-SshKey
+Export-ModuleMember -Function Add-SshKey
