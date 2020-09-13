@@ -29,7 +29,7 @@ function Get-GitBranch()
 function Start-SshAgent
 {
 	$running = Get-SshAgent
-	if ($running -ne $null) {
+	if ($null -ne $running) {
 		write-warning "ssh-agent is running at pid = $($running.id)"
 		return
 	}
@@ -60,7 +60,7 @@ function Get-SshAgent
 	# ssh-agent shipped with github returns a different PID to the actual windows PID. So
 	# we need to do a couple of contortions to make sure that any ssh-agent we find is
 	# owned by the running user.
-	if ($env:SSH_AGENT_PID -ne $null) {
+	if ($null -ne $env:SSH_AGENT_PID) {
 		$proc = Get-Process -name ssh-agent -ea SilentlyContinue
 		foreach ($process in $proc) {
 			$id = $process.Id
@@ -87,7 +87,7 @@ function Get-SshAgent
 function Stop-SshAgent
 {
 	$agent = Get-SshAgent
-	if ($agent -ne $null) {
+	if ($null -ne $agent) {
 		stop-process $agent
 
 		# This, frustatingly, can be slow. See https://superuser.com/questions/565771/setting-user-environment-variables-is-very-slow
@@ -105,7 +105,7 @@ function Enable-GithubKey
 	$githubKey = (get-item ~/.ssh/github.key).Fullname
 
 	$agent = Get-SshAgent
-	if ($agent -eq $null) {
+	if ($null -eq $agent) {
 		"Starting ssh-agent"
 		Start-SshAgent $agent
 	}
