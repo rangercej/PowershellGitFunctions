@@ -1,4 +1,4 @@
-#Requires -Version 4
+*#Requires -Version 4
 
 #------------------------------------------------------------------------------
 function Get-GitBranch()
@@ -132,21 +132,42 @@ function Enable-SshKey
 }
 
 #------------------------------------------------------------------------------
-function Add-SshKey
+function Import-SshKey
 {
 	Param (
 		[Parameter(Mandatory = $true)]	
 		[string]$gitHost,
 
 		[Parameter(Mandatory = $true)]	
-		[string]$keyFile
+		[string]$keyFile,
+
+		[switch]$force
 	)
 
-	$sshConfigFile = (get-item ~/.ssh/config).Fullname
+	$targetFile = Join-Path -Path $script:PrivateKeyPath -ChildPath $gitHost
 
-	"" | out-file -Append -Encoding utf8 $sshConfigFile
-	"Host $gitHost" | out-file -Append -Encoding utf8 $sshConfigFile
-	"    IdentityFile $keyFile" | out-file -Append -Encoding utf8 $sshConfigFile
+	if (Test-Path $targetFile) {
+		if (-not $force) {
+			throw "Already imported key for $gitHost ; use -force to overwrite"
+		}
+	}
+
+	Copy-Item -Force -Path $keyFile -Destination $targetFile
+	Set-HostKeyInternal -gitHost $gitHost -keyFile $keyFile
+}
+
+#------------------------------------------------------------------------------
+function Revoke-SshKey
+{
+	Param (
+		[Parameter(Mandatory = $true)]	
+		[string]$gitHost
+	)
+
+	$targetFile = Join-Path -Path $script:PrivateKeyPath -ChildPath $gitHost
+
+	Remove-Item -Force -Path $keyFile -Destination $targetFile
+	Remove-HostKeyInternal -gitHost $gitHost -keyFile $keyFile
 }
 
 #------------------------------------------------------------------------------
@@ -156,14 +177,12 @@ function Get-SshKey
 		[string]$gitHost = ""
 	)
 
-	$sshConfigFile = (get-item ~/.ssh/config).Fullname
-
 	$haveHost = $false
-	Get-Content $sshConfigFile | ForEach-Object {
+	Get-Content $script:SshConfigFile | ForEach-Object {
 		$line = $_ -replace '^\s*',''
-		if ($line -imatch "^Host ")
+		if ($line -imatch "^Host\s")
 		{
-			$configHost = ($line -split ' ')[1]
+			$configHost = ($line -split '\s+')[1]
 			if ($gitHost -eq $configHost -or $gitHost -eq "") {
 				$haveHost = $true
 			} else {
@@ -171,18 +190,126 @@ function Get-SshKey
 			}
 		}
 
-		if ($haveHost -and $line -imatch "^IdentityFile ") {
-			$keyFile = ($line -split ' ')[1]
+		if ($haveHost -and $line -imatch "^IdentityFile\s") {
+			$keyFile = ($line -split '\s+')[1]
 			[PSCustomObject]@{ "Host" = $configHost; "KeyFile" = (Get-Item $keyFile).FullName }
 		}
 	}
 }
 
 #------------------------------------------------------------------------------
+Remove-HostKeyInternal
+{
+	Param (
+		[Parameter(Mandatory = $true)]	
+		[string]$gitHost
+	)
+
+	$inHost = $false
+	$file = Get-Content $script:SshConfigFile | ForEach-Object {
+		$rawline = $_
+		if ($rawline -imatch "^\s*Match\s") {
+			$inHost = $false
+		} elseif ($rawline -imatch "^\s*Host\s+(.*)$") {
+			if ($gitHost -eq $matches[1]) {
+				$inHost = $true
+			} else {
+				$inHost = $false
+			}
+		}
+
+		if (-not $inHost) {
+			$rawLine
+		}
+	}
+
+	$file | Out-File -Encoding utf8 -Force $script:SshConfigFile
+}
+
+#------------------------------------------------------------------------------
+Set-HostKeyInternal
+{
+	Param (
+		[Parameter(Mandatory = $true)]	
+		[string]$gitHost,
+
+		[Parameter(Mandatory = $true)]	
+		[string]$keyFile
+	)
+
+	$processedHost = $false
+	$hostDef = @()
+	$configFile = @()
+	Get-Content $script:SshConfigFile | ForEach-Object {
+		$rawline = $_
+		$line = $rawline -replace '^\s*',''
+		if ($line -imatch "^Host\s" -or $line -imatch "^Match\s")
+		{
+			$isHostDef = ($hostDef[0] -match "^\s*Host\s+(.*)$")
+			if ($isHostDef -and $gitHost -eq $matches[1]) {
+				$hostDef = Merge-HostDefInternal -definition $hostDef -keyFile $keyFile
+				$processedHost = $true
+			}
+
+			$configFile += @("", $hostDef)
+			$hostDef = @($rawline)
+		} else {
+			if ($rawline.Trim() -ne "") {
+				$hostDef += $rawline
+			}
+		}
+	}
+
+	# Host wasn't found, so add it to the end of the config
+	if (-not $processedHost) {
+		$configFile += ("", 
+		"Host $gitHost",
+		"    IdentityFile $keyFile")
+	}
+
+	$configFile | out-file -Append -Encoding utf8 $script:SshConfigFile
+}
+
+#------------------------------------------------------------------------------
+Function Merge-HostDefInternal
+{
+	Param (
+		[string[]]$definition,
+		[string]$keyFile
+	)
+
+	$haveFile = $false
+	$definition | ForEach-Object {
+		$rawline = $_
+		$line = $rawline -replace '^\s*',''
+
+		if ($line -imatch "^IdentityFile\s") {
+			$function:haveFile = $true
+			$keyFile = ($line -split '\s+')[1]
+			"    IdentityFile $keyFile"
+		} else {
+			$rawline
+		}
+	}
+
+	if (-not $haveFile) {
+		"    IdentityFile $keyFile"
+	}
+}
+
+#------------------------------------------------------------------------------
+$script:PrivateKeyPath = Join-Path -Path $([Environment]::GetFolderPath('ApplicationData')) -ChildPath "Nightwolf/GitFunctions/keys"
+$script:SshConfigFile = (get-item ~/.ssh/config).Fullname
+
+if (-not (Test-Path $script:PrivateKeyPath)) {
+	New-Item -Type Directory -Path $script:PrivateKeyPath
+}
+
 Export-ModuleMember -Function Get-GitBranch
 Export-ModuleMember -Function Get-SshAgent
 Export-ModuleMember -Function Start-SshAgent
 Export-ModuleMember -Function Stop-SshAgent
 Export-ModuleMember -Function Enable-SshKey
 Export-ModuleMember -Function Get-SshKey
-Export-ModuleMember -Function Add-SshKey
+Export-ModuleMember -Function Import-SshKey
+Export-ModuleMember -Function Revoke-SshKey
