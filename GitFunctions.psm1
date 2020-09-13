@@ -198,7 +198,7 @@ function Get-SshKey
 }
 
 #------------------------------------------------------------------------------
-Remove-HostKeyInternal
+function Remove-HostKeyInternal
 {
 	Param (
 		[Parameter(Mandatory = $true)]	
@@ -227,7 +227,7 @@ Remove-HostKeyInternal
 }
 
 #------------------------------------------------------------------------------
-Set-HostKeyInternal
+function Set-HostKeyInternal
 {
 	Param (
 		[Parameter(Mandatory = $true)]	
