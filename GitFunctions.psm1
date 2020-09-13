@@ -228,7 +228,7 @@ function Remove-HostKeyInternal
 		}
 	}
 
-	$file | Out-File -Encoding utf8 -Force $script:SshConfigFile
+	$file | Out-File -Encoding ascii -Force $script:SshConfigFile
 }
 
 #------------------------------------------------------------------------------
@@ -272,7 +272,7 @@ function Set-HostKeyInternal
 		"    IdentityFile $keyFile")
 	}
 
-	$configFile | out-file -Append -Encoding utf8 $script:SshConfigFile
+	$configFile | out-file -Append -Encoding ascii $script:SshConfigFile
 }
 
 #------------------------------------------------------------------------------
