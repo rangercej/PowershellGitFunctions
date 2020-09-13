@@ -1,4 +1,4 @@
-*#Requires -Version 4
+#Requires -Version 4
 
 #------------------------------------------------------------------------------
 function Get-GitBranch()
@@ -284,7 +284,7 @@ Function Merge-HostDefInternal
 		$line = $rawline -replace '^\s*',''
 
 		if ($line -imatch "^IdentityFile\s") {
-			$function:haveFile = $true
+			$haveFile = $true
 			$keyFile = ($line -split '\s+')[1]
 			"    IdentityFile $keyFile"
 		} else {
