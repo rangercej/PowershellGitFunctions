@@ -1,5 +1,6 @@
 #Requires -Version 4
 
+#region Git functions
 #------------------------------------------------------------------------------
 function Get-GitBranch()
 {
@@ -24,7 +25,9 @@ function Get-GitBranch()
 		$branch
 	}
 }
+#endregion
 
+#region SSH Agent Functions
 #------------------------------------------------------------------------------
 function Start-SshAgent
 {
@@ -98,38 +101,32 @@ function Stop-SshAgent
 		[Environment]::SetEnvironmentVariable("SSH_AUTH_SOCK", $null, "Process")
 	}
 }
+#endregion
 
+#region Key creation and destruction
 #------------------------------------------------------------------------------
-function Enable-SshKey
+function New-SshKey
 {
 	Param (
-		[string]$gitHost = "github.com"
+		[Parameter(Mandatory = $true)]
+		[string]$gitHost,
+
+		[switch]$force
 	)
 
-	$githubKey = (Get-SshKey -Host $gitHost).KeyFile
-	if ($null -ne $githubKey) {
-		$agent = Get-SshAgent
-		if ($null -eq $agent) {
-			"Starting ssh-agent"
-			Start-SshAgent $agent
+	$targetFile = Join-Path -Path $script:KeyStore -ChildPath $gitHost
+
+	if (Test-Path $targetFile) {
+		if ($force) {
+			Remove-Item -Force $targetFile -ErrorAction SilentlyContinue
+			Remove-Item -Force "$($targetFile).pub" -ErrorAction SilentlyContinue
+		} else {
+			throw "Keyfile for $gitHost already exists. Use -force to overwrite key (existing key will be destroyed)."
 		}
-
-		$existingKeys = & "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" -l
-
-		# Output is something like:
-		#     2048 SHA256:eDHWeFhz3kAkB6YQ C:\Users\bob\.ssh\github.key (RSA)
-		foreach ($key in $existingKeys) {
-			$parts = $key -split " "
-			if ($parts[2] -eq $githubKey) {
-				write-warning "Key already added: $key"
-				return
-			}
-		}
-
-		"Adding github key"
-		& "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" $githubKey
 	}
-}
+
+	& "$env:ProgramFiles\Git\usr\bin\ssh-keygen.exe" -q -t ed25519 -f $targetFile
+ }
 
 #------------------------------------------------------------------------------
 function Import-SshKey
@@ -141,10 +138,13 @@ function Import-SshKey
 		[Parameter(Mandatory = $true)]	
 		[string]$keyFile,
 
+		[Parameter(Mandatory = $false)]	
+		[string]$publicKeyFile,
+
 		[switch]$force
 	)
 
-	$targetFile = Join-Path -Path $script:PrivateKeyPath -ChildPath $gitHost
+	$targetFile = Join-Path -Path $script:KeyStore -ChildPath $gitHost
 
 	if (Test-Path $targetFile) {
 		if (-not $force) {
@@ -153,21 +153,64 @@ function Import-SshKey
 	}
 
 	Copy-Item -Force -Path $keyFile -Destination $targetFile
-	Set-HostKeyInternal -gitHost $gitHost -keyFile $targetFile
+	if ($publicKeyFile -ne $null -and $publicKeyFile -ne "") {
+		Copy-Item -Force -Path $publicKeyFile -Destination "$($targetFile).pub"
+	}
+
+	Enable-SshKey -gitHost $gitHost
 }
 
 #------------------------------------------------------------------------------
-function Revoke-SshKey
+function Export-SshKey
 {
 	Param (
 		[Parameter(Mandatory = $true)]	
-		[string]$gitHost
+		[string]$gitHost,
+
+		[switch]$privateKey
 	)
 
-	$targetFile = Join-Path -Path $script:PrivateKeyPath -ChildPath $gitHost
+	$keyFile = Join-Path -Path $script:KeyStore -ChildPath $gitHost
 
-	Remove-Item -Force -Path $targetFile
-	Remove-HostKeyInternal -gitHost $gitHost
+	if (-not (Test-Path $targetFile)) {
+		throw "Already imported key for $gitHost ; use -force to overwrite"
+	}
+
+	if ($privateKey) {
+		Copy-Item -Force -Path $keyFile -Destination "$($gitHost).pvk"
+		"Private key copied to $($gitHost).pvk"
+	}
+
+	if (Test-Path "$($keyFile).pub") {
+		Copy-Item -Force -Path "$($keyFile).pub" -Destination "$($gitHost).pub"
+		"Public key copied to $($gitHost).pub"
+	}
+}
+
+#------------------------------------------------------------------------------
+function Remove-SshKey
+{
+	Param (
+		[Parameter(Mandatory = $true)]	
+		[string]$gitHost,
+		[switch]$force
+	)
+
+	$doDelete = $false
+	if (-not $force) {
+		$result = $host.ui.promptforchoice("Remove key?", "This action will permenantly destroy the key. Do you want to continue?", @('&Yes','&No'), 1)
+		if ($result -eq 0) {
+			$doDelete = $true
+		}
+	}
+
+	if ($doDelete) {
+		$targetFile = Join-Path -Path $script:KeyStore -ChildPath $gitHost
+
+		Remove-Item -Force -Path $targetFile
+		Remove-Item -Force -Path "$($targetFile).pub" -ErrorAction SilentlyContinue
+		Disable-SshKey -gitHost $gitHost
+	}
 }
 
 #------------------------------------------------------------------------------
@@ -177,33 +220,30 @@ function Get-SshKey
 		[string]$gitHost = ""
 	)
 
-	if (-not (Test-Path $script:SshConfigFile))
-	{
-		return
-	}
+	$hostConfig = Get-KeyfileForHostsInternal
+	Get-ChildItem $script:KeyStore | ForEach-Object {
+		$targetFile = $_
+		if ($targetFile.Extension -ine ".pub") {
+			if ($gitHost -eq $null -or $gitHost -eq "" -or $gitHost -ieq $targetFile.Name) {
+				$output = & "$env:ProgramFiles\Git\usr\bin\ssh-keygen.exe" -l -f $targetFile.FullName
+				($keySize, $hash, $email, $algo) = $output -split ' '
 
-	$haveHost = $false
-	Get-Content $script:SshConfigFile | ForEach-Object {
-		$line = $_ -replace '^\s*',''
-		if ($line -imatch "^Host\s")
-		{
-			$configHost = ($line -split '\s+')[1]
-			if ($gitHost -eq $configHost -or $gitHost -eq "") {
-				$haveHost = $true
-			} else {
-				$haveHost = $false
+				[PSCustomObject]@{
+					"Host" = $targetFile.Name
+					"KeySize" = $keySize
+					"Email" = $email
+					"Algorithm" = $algo -replace '^\((.*)\)$','$1'
+					"Enabled" = ($null -ne ($hostConfig | Where-Object { $_.Host -ieq $gitHost }))
+				}
 			}
-		}
-
-		if ($haveHost -and $line -imatch "^IdentityFile\s") {
-			$keyFile = ($line -split '\s+')[1]
-			[PSCustomObject]@{ "Host" = $configHost; "KeyFile" = (Get-Item $keyFile).FullName }
 		}
 	}
 }
+#endregion
 
+#region Key enable and disable
 #------------------------------------------------------------------------------
-function Remove-HostKeyInternal
+function Disable-SshKey
 {
 	Param (
 		[Parameter(Mandatory = $true)]	
@@ -232,15 +272,17 @@ function Remove-HostKeyInternal
 }
 
 #------------------------------------------------------------------------------
-function Set-HostKeyInternal
+function Enable-SshKey
 {
 	Param (
 		[Parameter(Mandatory = $true)]	
-		[string]$gitHost,
-
-		[Parameter(Mandatory = $true)]	
-		[string]$keyFile
+		[string]$gitHost
 	)
+
+	$targetFile = Join-Path -Path $script:KeyStore -ChildPath $gitHost
+	if (-not (Test-Path $targetFile)) {
+		throw "Keyfile for host $githost does not exist."
+	}
 
 	$processedHost = $false
 	$hostDef = @()
@@ -252,7 +294,7 @@ function Set-HostKeyInternal
 		{
 			$isHostDef = ($hostDef[0] -match "^\s*Host\s+(.*)$")
 			if ($isHostDef -and $gitHost -eq $matches[1]) {
-				$hostDef = Merge-HostDefInternal -definition $hostDef -keyFile $keyFile
+				$hostDef = Merge-HostDefInternal -definition $hostDef -keyFile $targetFile
 				$processedHost = $true
 			}
 
@@ -269,12 +311,80 @@ function Set-HostKeyInternal
 	if (-not $processedHost) {
 		$configFile += ("", 
 		"Host $gitHost",
-		"    IdentityFile $keyFile")
+		"    IdentityFile $targetFile")
 	}
 
 	$configFile | out-file -Append -Encoding ascii $script:SshConfigFile
 }
+#endregion
 
+#region Key unlocking/locking
+#------------------------------------------------------------------------------
+function Unlock-SshKey
+{
+	Param (
+		[string]$gitHost = "github.com"
+	)
+
+	$githubKey = (Get-KeyfileForHostsInternal | Where-Object { $_.Host -eq $gitHost }).KeyFile
+	if ($null -ne $githubKey) {
+		$agent = Get-SshAgent
+		if ($null -eq $agent) {
+			"Starting ssh-agent"
+			Start-SshAgent $agent
+		}
+
+		$existingKeys = & "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" -l
+
+		# Output is something like:
+		#     2048 SHA256:eDHWeFhz3kAkB6YQ C:\Users\bob\.ssh\github.key (RSA)
+		foreach ($key in $existingKeys) {
+			$parts = $key -split " "
+			if ($parts[2] -eq $githubKey) {
+				write-warning "Key already added: $key"
+				return
+			}
+		}
+
+		"Unlocking key for $gitHost"
+		& "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" $githubKey
+	}
+}
+
+#------------------------------------------------------------------------------
+function Lock-SshKey
+{
+	Param (
+		[string]$gitHost = "github.com"
+	)
+
+	$githubKey = (Get-KeyfileForHostsInternal | Where-Object { $_.Host -eq $gitHost }).KeyFile
+	if ($null -ne $githubKey) {
+
+		$existingKeys = & "$env:ProgramFiles\Git\usr\bin\ssh-add.exe" -l
+
+		# Output is something like:
+		#     2048 SHA256:eDHWeFhz3kAkB6YQ C:\Users\bob\.ssh\github.key (RSA)
+		$keyFound = $false
+		foreach ($key in $existingKeys) {
+			$parts = $key -split " "
+			if ($parts[2] -eq $githubKey) {
+				$keyFound = $true
+			}
+		}
+
+		if ($keyFound) {
+			"Locking key for $gitHost"
+			& "$env:ProgramFiles\Git\usr\bin\ssh-add.exe -d" $githubKey
+		} else {
+			write-warning "Key not currently unlocked."
+		}
+	}
+}
+
+#endregion
+
+#region Internal/module private functions
 #------------------------------------------------------------------------------
 Function Merge-HostDefInternal
 {
@@ -303,9 +413,27 @@ Function Merge-HostDefInternal
 }
 
 #------------------------------------------------------------------------------
-$script:PrivateKeyPath = Join-Path -Path $([Environment]::GetFolderPath('ApplicationData')) -ChildPath "Nightwolf/GitFunctions/keys"
-if (-not (Test-Path $script:PrivateKeyPath)) {
-	New-Item -Type Directory -Path $script:PrivateKeyPath
+function Get-KeyfileForHostsInternal
+{
+	Get-Content $script:SshConfigFile | ForEach-Object {
+		$line = $_ -replace '^\s*',''
+		if ($line -imatch "^Host\s")
+		{
+			$configHost = ($line -split '\s+')[1]
+		}
+
+		if ($line -imatch "^IdentityFile\s") {
+			$keyFile = ($line -split '\s+')[1]
+			[PSCustomObject]@{ "Host" = $configHost; "KeyFile" = (Get-Item $keyFile).FullName }
+		}
+	}
+}
+#endregion
+
+#------------------------------------------------------------------------------
+$script:KeyStore = Join-Path -Path $([Environment]::GetFolderPath('ApplicationData')) -ChildPath "Nightwolf/GitFunctions/keys"
+if (-not (Test-Path $script:KeyStore)) {
+	New-Item -Type Directory -Path $script:KeyStore
 }
 
 # We can't use (get-item).fullname if config doesn't exist. Nor can we use
@@ -321,6 +449,12 @@ Export-ModuleMember -Function Get-SshAgent
 Export-ModuleMember -Function Start-SshAgent
 Export-ModuleMember -Function Stop-SshAgent
 Export-ModuleMember -Function Enable-SshKey
+Export-ModuleMember -Function Disable-SshKey
 Export-ModuleMember -Function Get-SshKey
+Export-ModuleMember -Function New-SshKey
 Export-ModuleMember -Function Import-SshKey
-Export-ModuleMember -Function Revoke-SshKey
+Export-ModuleMember -Function Export-SshKey
+Export-ModuleMember -Function Remove-SshKey
+Export-ModuleMember -Function Lock-SshKey
+Export-ModuleMember -Function Unlock-SshKey
+
